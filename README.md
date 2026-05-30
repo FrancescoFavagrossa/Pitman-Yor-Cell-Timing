@@ -1,172 +1,176 @@
-# DCB PYP Model
+# Pitman–Yor Process Clustering for Amplification Timing
 
-This repository contains an R implementation of a copy-number alteration (CNA) timing model for PCAWG data. The main script is `DCB_PYP_Final2.R`.
+This project estimates copy-number amplification timing from mutation VAFs and clusters timing events using a truncated Pitman–Yor process mixture model.
 
-The project starts from the TickTack idea of estimating when copy-number gains occurred from mutation burdens and variant allele frequencies (VAFs), then extends the temporal clustering step with a Pitman-Yor Process (PYP). The goal is to infer evolutionary "clocks" without fixing the number of clusters in advance, while separating large clonal CNA waves from low-frequency noisy events.
+---
 
-## Main Model
+## Segment Timing
 
-The implemented pipeline has five conceptual stages:
+For segment $s$, let
 
-1. Load PCAWG mutation, copy-number, and metadata tables.
-2. Estimate segment-specific CNA timing from VAF and copy-number state.
-3. Cluster timing estimates using a Pitman-Yor Process mixture.
-4. Validate the inferred clusters with retrospective likelihood and posterior predictive checks.
-5. Compare the PYP clustering against the original TickTack package.
+$$C_s = n_{A,s} + n_{B,s}$$
 
-The model focuses on patient `DO51964` in the saved validation object, but the script automatically searches among candidate samples with many amplifications.
+be the total copy number, and let $\rho$ be tumor purity.
 
-## Timing Estimation
+The expected VAF for a mutation present on one copy is
 
-For each amplified copy-number segment, the code collects mutations falling inside the segment and requires at least `MIN_MUT_PER_SEGMENT = 5` mutations.
+$$p_{1s} = \frac{\rho}{C_s \rho + 2(1-\rho)}.$$
 
-For a segment with total copy number `N`, tumor purity `pi`, and `j` mutated copies, the expected VAF is:
+The expected VAF for a mutation duplicated by the amplification is
 
-```text
-p_j = (pi * j) / (N * pi + 2 * (1 - pi))
-```
+$$p_{2s} = \frac{2\rho}{C_s \rho + 2(1-\rho)}.$$
 
-The observed mean VAF is converted into the estimated proportion of pre-gain mutations:
+Given the mean observed VAF
 
-```text
-theta_2 = (VAF_obs - p_1) / (p_2 - p_1)
-theta_1 = 1 - theta_2
-```
+$$\bar{v}_s = \frac{1}{M_s} \sum_{m=1}^{M_s} \mathrm{VAF}_{sm},$$
 
-The segment timing estimate `tau` is then obtained with copy-number-specific formulas:
+we estimate
 
-```text
-CNLOH:      tau = (2 * theta_2) / (2 * theta_2 + theta_1)
-Trisomy:   tau = (3 * theta_2) / (theta_1 + 2 * theta_2)
-Tetrasomy: tau = (2 * theta_2) / (2 * theta_2 + theta_1)
-HighAmp:   tau = (theta_2 * total_cn) / (theta_1 + theta_2 * total_cn)
-```
+$$\bar{v}_s = \theta_{1s} p_{1s} + \theta_{2s} p_{2s},$$
 
-This gives each CNA segment a pseudo-time value in `[0, 1]`, where lower values indicate earlier events and higher values indicate later events.
+with
 
-## Pitman-Yor Process Extension
+$$\theta_{1s} + \theta_{2s} = 1.$$
 
-The core extension is in `fit_pitman_yor_clustering()`.
+Therefore,
 
-Instead of using a fixed finite mixture, the model uses a truncated stick-breaking Pitman-Yor Process mixture:
+$$\theta_{2s} = \frac{\bar{v}_s - p_{1s}}{p_{2s} - p_{1s}}, \qquad \theta_{1s} = 1 - \theta_{2s}.$$
 
-```text
-G ~ PYP(alpha, d, G0)
-G0 = Uniform(0, 1)
-tau_i | cluster k ~ Normal(mu_k, sigma^2)
-```
+The timing estimate is $\tau_s \in [0,1]$.
 
-The implementation uses:
+For CNLOH and tetrasomy,
 
-```text
-ALPHA_PYP    = 2.0
-DISCOUNT_PYP = 0.5
-SIGMA_LIK    = 0.10
-K_TRUNC      = 15
-```
+$$\tau_s = \frac{2\theta_{2s}}{2\theta_{2s} + \theta_{1s}}.$$
 
-The discount parameter lets the model produce uneven, power-law-like cluster sizes. This is useful for CNA timing because major clonal bursts may contain hundreds of events, while neutral or subclonal noise may appear as isolated small clusters.
+For trisomy,
 
-The sampler updates:
+$$\tau_s = \frac{3\theta_{2s}}{\theta_{1s} + 2\theta_{2s}}.$$
 
-- cluster assignments `z_i`
-- cluster centers `mu_k`
-- stick-breaking weights `v_k`
+For general amplifications,
 
-The Gaussian likelihood is motivated by the second part of the slide deck: segment-level timing estimates are treated as noisy continuous observations, with the Central Limit Theorem supporting an approximate Normal working model when each segment has enough mutations.
+$$\tau_s = \frac{C_s \theta_{2s}}{\theta_{1s} + C_s \theta_{2s}}.$$
 
-## Validation
+---
 
-The script validates the PYP result in two ways.
+## Pitman–Yor Mixture Model
 
-First, `compute_retrospective_likelihood()` reconstructs the expected mutation mixture for each segment and scores observed VAFs under a binomial model using an approximate depth of `100`.
+The segment timings are modeled as
 
-Second, `posterior_predictive_vaf()` simulates predicted VAF distributions from the inferred timing model and compares observed versus predicted VAFs using Kolmogorov-Smirnov tests per cluster.
+$$\tau_s \mid z_s = k,\, \mu_k,\, \sigma^2 \sim \mathcal{N}(\mu_k, \sigma^2).$$
 
-These validation steps are designed to check whether the inferred temporal clusters explain the observed VAF structure, not only whether the clusters look separated in timing space.
+The marginal density is
 
-## TickTack Comparison
+$$p(\tau_s) = \sum_{k=1}^{K} w_k \, \mathcal{N}(\tau_s \mid \mu_k, \sigma^2).$$
 
-The script also converts the inferred segment and mutation data into the format expected by the `tickTack` R package:
+The random mixing measure is
 
-```r
-convert_to_ticktack()
-analyze_patient_ticktack()
-compare_methods()
-```
+$$G = \sum_{k=1}^{K} w_k \delta_{\mu_k}.$$
 
-The comparison reports:
+The stick-breaking weights are
 
-- number of clusters
-- cluster sizes
-- within-cluster variance
-- inter-cluster separation
-- singleton clusters
-- TickTack AIC/BIC model selection when available
+$$w_k = v_k \prod_{\ell < k}(1 - v_\ell),$$
 
-This makes the PYP model a direct extension of the TickTack framework rather than a completely separate analysis.
+with
 
-## Result Highlight
+$$v_k \sim \mathrm{Beta}(1 - d,\, \alpha).$$
 
-The saved validation result `DO51964_Validation_Results.rds` reports 7 active PYP clusters for patient `DO51964`:
+Here $\alpha > 0$ is the concentration parameter and $0 \le d < 1$ is the Pitman–Yor discount. When $d = 0$ the model behaves like a Dirichlet-process mixture; when $d > 0$ it supports heavier-tailed cluster-size distributions.
 
-| Cluster | CNAs | Mean tau | Interpretation |
-| --- | ---: | ---: | --- |
-| 1 | 106 | 0.044 | Early phase establishment |
-| 2 | 193 | 0.372 | Major clonal expansion |
-| 3 | 1 | 0.529 | Subclonality / noise |
-| 4 | 217 | 0.665 | Sustained progression phase |
-| 5 | 1 | 1.000 | Isolated terminal event |
-| 6 | 1 | 0.964 | Isolated terminal event |
-| 7 | 294 | 0.908 | Late "Hopeful Monster" burst |
+---
 
-The important biological interpretation is that the PYP separates the dominant CNA waves from singleton events. Cluster 7 is the largest late amplification burst, while clusters 3, 5, and 6 are isolated low-frequency events that would otherwise risk contaminating the major temporal clocks.
+## Allocation Probability
 
-## Files
+For each segment,
 
-```text
-DCB_PYP_Final2.R                  Main model and analysis pipeline
-DO51964_Validation_Results.rds    Saved validation result for DO51964
-DCB_SLIDES_Favagrossa.pdf         Slide deck describing TickTack and the PYP extension
-wasserstein_heatmap.png           Supporting result figure
-Data/                             PCAWG input data
-```
+$$\Pr(z_s = k \mid {-}) \propto w_k \, \mathcal{N}(\tau_s \mid \mu_k, \sigma^2).$$
 
-## Requirements
+After normalization,
 
-The main script uses R and the following packages:
+$$\Pr(z_s = k \mid {-}) = \frac{w_k \, \mathcal{N}(\tau_s \mid \mu_k, \sigma^2)}{\displaystyle\sum_{h=1}^{K} w_h \, \mathcal{N}(\tau_s \mid \mu_h, \sigma^2)}.$$
 
-```r
-data.table
-dplyr
-tickTack
-```
+---
 
-The local R environment used during cleanup had `data.table` and `dplyr` installed, but `tickTack` was missing. Install TickTack before running the complete comparison pipeline.
+## Gibbs Updates
 
-## Running
+Let $n_k = |\{s : z_s = k\}|$ and $n_{>k} = \sum_{h=k+1}^{K} n_h$.
 
-From the repository root:
+The stick-breaking update is
 
-```bash
-Rscript DCB_PYP_Final2.R
-```
+$$v_k \mid {-} \sim \mathrm{Beta}\left(1 - d + n_k,\; \alpha + dk + n_{>k}\right).$$
 
-The script expects the PCAWG files to be present in `Data/`. Output is saved as:
+For occupied clusters,
 
-```text
-<patient_id>_CompleteResults.rds
-```
+$$\mu_k \mid {-} \sim \mathcal{N}\left(\bar{\tau}_k,\; \frac{\sigma^2}{n_k}\right),$$
 
-## Current Assumptions and Limitations
+where
 
-- Tumor purity is fixed at `PURITY = 1.0`.
-- Timing is represented as abstract pseudo-time, not calendar time.
-- The PYP sampler is a practical truncated implementation with `K_TRUNC = 15`.
-- The retrospective likelihood uses an approximate fixed sequencing depth of `100`.
-- Hyperparameters `alpha`, `discount`, and `sigma` may need sensitivity analysis across tumor types.
-- Singleton clusters are useful for noise isolation, but broader use would require standardized post-processing rules.
+$$\bar{\tau}_k = \frac{1}{n_k} \sum_{s:\, z_s=k} \tau_s.$$
 
-## Thesis Contribution
+---
 
-The central contribution is replacing a fixed temporal clustering approach with a non-parametric Pitman-Yor Process mixture. This allows the model to infer the number and size of evolutionary clocks from the data, capture large CNA bursts, and isolate rare noisy events. In the DO51964 analysis, this produces a high-resolution reconstruction with 7 temporal clusters and a clear late amplification burst.
+## Retrospective Likelihood
+
+Given timing $\tau_s$, recover $\theta_{2s}$.
+
+For CNLOH and tetrasomy,
+
+$$\theta_{2s} = \frac{\tau_s}{2 - \tau_s}.$$
+
+For trisomy,
+
+$$\theta_{2s} = \frac{\tau_s}{3 - 2\tau_s}.$$
+
+For general amplifications,
+
+$$\theta_{2s} = \frac{\tau_s}{C_s - \tau_s(C_s - 2)}.$$
+
+Then $\theta_{1s} = 1 - \theta_{2s}$.
+
+With depth $D = 100$ and alternate read count $a_{sm} = \mathrm{round}(D \cdot \mathrm{VAF}_{sm})$, the mutation likelihood is
+
+$$L_{sm} = \theta_{1s} \, \mathrm{Binomial}(a_{sm} \mid D, p_{1s}) + \theta_{2s} \, \mathrm{Binomial}(a_{sm} \mid D, p_{2s}).$$
+
+The total log-likelihood is
+
+$$\mathcal{L} = \sum_s \sum_m \log(L_{sm} + \varepsilon).$$
+
+---
+
+## Posterior Predictive Check
+
+For each mutation,
+
+$$c_{sm} \sim \mathrm{Categorical}(\theta_{1s}, \theta_{2s}).$$
+
+Then
+
+$$p_{sm} = \begin{cases} p_{1s}, & c_{sm} = 1, \\ p_{2s}, & c_{sm} = 2. \end{cases}$$
+
+Replicated read counts are sampled as
+
+$$a_{sm}^{\mathrm{rep}} \sim \mathrm{Binomial}(D, p_{sm}),$$
+
+with replicated VAF
+
+$$\mathrm{VAF}_{sm}^{\mathrm{rep}} = \frac{a_{sm}^{\mathrm{rep}}}{D}.$$
+
+Observed and replicated VAFs are compared using the Kolmogorov–Smirnov statistic per cluster:
+
+$$D_k = \sup_x \left| F_k^{\mathrm{obs}}(x) - F_k^{\mathrm{rep}}(x) \right|.$$
+
+---
+
+## Model Comparison
+
+The PYP model is compared against TickTack using
+
+$$\Delta\mathcal{L} = \mathcal{L}_{\mathrm{PYP}} - \mathcal{L}_{\mathrm{TickTack}}.$$
+
+The within-cluster variance is
+
+$$\mathrm{WCV} = \frac{\displaystyle\sum_{k=1}^{K} (n_k - 1)\,\widehat{\mathrm{Var}}\{\tau_s : z_s = k\}}{S - K}.$$
+
+The relative improvement is
+
+$$100 \cdot \frac{\mathrm{WCV}_{\mathrm{TickTack}} - \mathrm{WCV}_{\mathrm{PYP}}}{\mathrm{WCV}_{\mathrm{TickTack}}}.$$
+
